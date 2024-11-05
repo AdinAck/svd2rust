@@ -1177,7 +1177,7 @@ pub fn fields(
                             proxy_items.extend(quote! {
                                 #[doc = #doc]
                                 #inline
-                                pub fn #sc(self) -> &'a mut crate::W<REG> {
+                                pub fn #sc(self) -> &'a mut crate::W<#regspec_ty> {
                                     self.variant(#value_write_ty::#pc)
                                 }
                             });
@@ -1220,14 +1220,6 @@ pub fn fields(
                 "'a",
                 Span::call_site(),
             ))));
-            generics.push(GenericParam::Type(TypeParam {
-                attrs: Vec::new(),
-                ident: Ident::new("REG", Span::call_site()),
-                colon_token: None,
-                bounds: Punctuated::new(),
-                eq_token: None,
-                default: None,
-            }));
             if matches!(f, Field::Array(_, _)) {
                 generics.push(GenericParam::Const(ConstParam {
                     attrs: Vec::new(),
@@ -1272,20 +1264,20 @@ pub fn fields(
                             span,
                         );
                         if value_write_ty == "bool" {
-                            quote! { crate::#wproxy<'a, REG, #offset_calc> }
+                            quote! { crate::#wproxy<'a, #regspec_ty, #offset_calc> }
                         } else {
-                            quote! { crate::#wproxy<'a, REG, #offset_calc, #value_write_ty> }
+                            quote! { crate::#wproxy<'a, #regspec_ty, #offset_calc, #value_write_ty> }
                         }
                     } else {
                         let wproxy = Ident::new("FieldWriter", span);
                         let uwidth = &unsuffixed(width);
                         if value_write_ty == "u8" && safety != Safety::Safe {
-                            quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc> }
+                            quote! { crate::#wproxy<'a, #regspec_ty, #uwidth, #offset_calc> }
                         } else if safety != Safety::Safe {
-                            quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc, #value_write_ty> }
+                            quote! { crate::#wproxy<'a, #regspec_ty, #uwidth, #offset_calc, #value_write_ty> }
                         } else {
                             let safe_ty = safety.ident(width);
-                            quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc, #value_write_ty, crate::#safe_ty> }
+                            quote! { crate::#wproxy<'a, #regspec_ty, #uwidth, #offset_calc, #value_write_ty, crate::#safe_ty> }
                         }
                     };
 
@@ -1305,7 +1297,7 @@ pub fn fields(
                             let offset_calc = calculate_offset(i as _, de.dim_increment, offset);
 
                             mod_items.extend(quote! {
-                                pub type #ident<'a, REG> = #writer_ty<'a, REG, #offset_calc>;
+                                pub type #ident<'a> = #writer_ty<'a, #offset_calc>;
                             });
                         }
                     }
@@ -1330,8 +1322,6 @@ pub fn fields(
                 mod_items.extend(if width == 1 {
                     quote! {
                         impl #impl_generics #writer_ty #ty_generics
-                        where
-                            REG: crate::Writable + crate::RegisterSpec,
                         {
                             #proxy_items
                         }
@@ -1339,9 +1329,6 @@ pub fn fields(
                 } else {
                     quote! {
                         impl #impl_generics #writer_ty #ty_generics
-                        where
-                            REG: crate::Writable + crate::RegisterSpec,
-                            REG::Ux: From<#fty>
                         {
                             #proxy_items
                         }
@@ -1384,7 +1371,7 @@ pub fn fields(
                     w_impl_items.extend(quote! {
                         #[doc = #doc]
                         #inline
-                        pub fn #name_snake_case_n(&mut self) -> #ident<#regspec_ty> {
+                        pub fn #name_snake_case_n(&mut self) -> #ident {
                             #ident::new(self)
                         }
                     });
@@ -1393,7 +1380,7 @@ pub fn fields(
                 w_impl_items.extend(quote! {
                     #[doc = #doc]
                     #inline
-                    pub fn #name_snake_case(&mut self) -> #writer_ty<#regspec_ty> {
+                    pub fn #name_snake_case(&mut self) -> #writer_ty {
                         #writer_ty::new(self)
                     }
                 });
