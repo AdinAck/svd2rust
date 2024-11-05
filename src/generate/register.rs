@@ -5,13 +5,15 @@ use crate::svd::{
 };
 use log::warn;
 use proc_macro2::{Delimiter, Group, Ident, Span, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote, ToTokens};
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::{borrow::Cow, collections::BTreeMap};
 use svd_parser::expand::{
     derive_enumerated_values, derive_field, BlockPath, EnumPath, FieldPath, Index, RegisterPath,
 };
+use syn::token::{Colon, Const};
+use syn::{ConstParam, GenericParam, Generics, Lifetime, LifetimeParam, Token, Type, TypeParam};
 
 use crate::config::Config;
 use crate::util::{
@@ -742,17 +744,6 @@ pub fn fields(
             String::new()
         };
 
-        let offset_calc = match &f {
-            Field::Single(_) => {
-                let lit = unsuffixed(offset);
-                quote! { #lit }
-            }
-            Field::Array(_, de) => {
-                // calculate_offset(de.dim_increment, offset, false)
-                quote! { 0 }
-            }
-        };
-
         // If this field can be read, generate read proxy structure and value structure.
         if can_read {
             // collect information on items in enumeration to generate it later.
@@ -1020,26 +1011,26 @@ pub fn fields(
                 let doc = description.expand_dim(&brief_suffix);
                 let first_name = svd::array::names(f, de).next().unwrap();
                 let note = format!("<div class=\"warning\">`n` is number of field in register. `n == 0` corresponds to `{first_name}` field.</div>");
-                let value = quote! { ((self.bits >> #offset_calc) & #hexmask) #cast };
+                let value = quote! { ((self.bits >> todo!()) & #hexmask) #cast };
                 let dim = unsuffixed(de.dim);
                 let name_snake_case_iter = Ident::new(&format!("{name_snake_case}_iter"), span);
-                r_impl_items.extend(quote! {
-                    #[doc = #doc]
-                    #[doc = ""]
-                    #[doc = #note]
-                    #inline
-                    pub fn #name_snake_case(&self, n: u8) -> #reader_ty {
-                        #[allow(clippy::no_effect)]
-                        [(); #dim][n as usize];
-                        #reader_ty::new ( #value )
-                    }
-                    #[doc = "Iterator for array of:"]
-                    #[doc = #doc]
-                    #inline
-                    pub fn #name_snake_case_iter(&self) -> impl Iterator<Item = #reader_ty> + '_ {
-                        (0..#dim).map(move |n| #reader_ty::new ( #value ))
-                    }
-                });
+                // r_impl_items.extend(quote! {
+                //     #[doc = #doc]
+                //     #[doc = ""]
+                //     #[doc = #note]
+                //     #inline
+                //     pub fn #name_snake_case(&self, n: u8) -> #reader_ty {
+                //         #[allow(clippy::no_effect)]
+                //         [(); #dim][n as usize];
+                //         #reader_ty::new ( #value )
+                //     }
+                //     #[doc = "Iterator for array of:"]
+                //     #[doc = #doc]
+                //     #inline
+                //     pub fn #name_snake_case_iter(&self) -> impl Iterator<Item = #reader_ty> + '_ {
+                //         (0..#dim).map(move |n| #reader_ty::new ( #value ))
+                //     }
+                // });
 
                 for fi in svd::field::expand(f, de) {
                     let sub_offset = fi.bit_offset() as u64;
@@ -1224,9 +1215,48 @@ pub fn fields(
 
             let doc = description_with_bits(description_raw, offset, width);
 
+            let mut generics = Punctuated::<_, Token![,]>::new();
+            generics.push(GenericParam::Lifetime(LifetimeParam::new(Lifetime::new(
+                "'a",
+                Span::call_site(),
+            ))));
+            generics.push(GenericParam::Type(TypeParam {
+                attrs: Vec::new(),
+                ident: Ident::new("REG", Span::call_site()),
+                colon_token: None,
+                bounds: Punctuated::new(),
+                eq_token: None,
+                default: None,
+            }));
+            if matches!(f, Field::Array(_, _)) {
+                generics.push(GenericParam::Const(ConstParam {
+                    attrs: Vec::new(),
+                    const_token: Const::default(),
+                    ident: Ident::new("O", Span::call_site()),
+                    colon_token: Colon::default(),
+                    ty: Type::Verbatim(quote! { u8 }),
+                    eq_token: None,
+                    default: None,
+                }));
+            }
+
+            let generics = Generics {
+                lt_token: None,
+                params: generics,
+                gt_token: None,
+                where_clause: None,
+            };
+
+            let (impl_generics, ty_generics, ..) = generics.split_for_impl();
+
             // Generate writer structure by type alias to generic write proxy structure.
             match rwenum.write_enum() {
                 Some(EV::New(_)) | None => {
+                    let offset_calc = match f {
+                        Field::Single(_) => unsuffixed(offset).to_token_stream(),
+                        Field::Array(_, _) => quote! { O },
+                    };
+
                     let proxy = if width == 1 {
                         use ModifiedWriteValues::*;
                         let wproxy = Ident::new(
@@ -1258,10 +1288,27 @@ pub fn fields(
                             quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc, #value_write_ty, crate::#safe_ty> }
                         }
                     };
+
                     mod_items.extend(quote! {
                         #[doc = #field_writer_brief]
-                        pub type #writer_ty<'a, REG> = #proxy;
+                        pub type #writer_ty #impl_generics = #proxy;
                     });
+
+                    if let Field::Array(_, de) = &f {
+                        for (i, fi) in svd::field::expand(&f, de).enumerate() {
+                            let ident = format_ident!(
+                                "{}_W",
+                                inflections::case::to_constant_case(
+                                    field_accessor(&fi.name, config, span).to_string().as_str(),
+                                )
+                            );
+                            let offset_calc = calculate_offset(i as _, de.dim_increment, offset);
+
+                            mod_items.extend(quote! {
+                                pub type #ident<'a, REG> = #writer_ty<'a, REG, #offset_calc>;
+                            });
+                        }
+                    }
                 }
                 Some(EV::Derived(_, base)) => {
                     // generate pub use field_1 writer as field_2 writer
@@ -1282,7 +1329,7 @@ pub fn fields(
             if !proxy_items.is_empty() {
                 mod_items.extend(if width == 1 {
                     quote! {
-                        impl<'a, REG> #writer_ty<'a, REG>
+                        impl #impl_generics #writer_ty #ty_generics
                         where
                             REG: crate::Writable + crate::RegisterSpec,
                         {
@@ -1291,7 +1338,7 @@ pub fn fields(
                     }
                 } else {
                     quote! {
-                        impl<'a, REG> #writer_ty<'a, REG>
+                        impl #impl_generics #writer_ty #ty_generics
                         where
                             REG: crate::Writable + crate::RegisterSpec,
                             REG::Ux: From<#fty>
@@ -1307,19 +1354,18 @@ pub fn fields(
                 let first_name = svd::array::names(f, de).next().unwrap();
                 let note = format!("<div class=\"warning\">`n` is number of field in register. `n == 0` corresponds to `{first_name}` field.</div>");
                 let dim = unsuffixed(de.dim);
-                w_impl_items.extend(quote! {
-                    #[doc = #doc]
-                    #[doc = ""]
-                    #[doc = #note]
-                    #inline
-                    pub fn #name_snake_case(&mut self, n: u8) -> #writer_ty<#regspec_ty> {
-                        #[allow(clippy::no_effect)]
-                        [(); #dim][n as usize];
-                        #writer_ty::new(self)
-                    }
-                });
+                // w_impl_items.extend(quote! {
+                //     #[doc = #doc]
+                //     #[doc = ""]
+                //     #[doc = #note]
+                //     #inline
+                //     pub fn #name_snake_case(&mut self) -> #writer_ty<#regspec_ty> {
+                //         #[allow(clippy::no_effect)]
+                //         #writer_ty::new(self)
+                //     }
+                // });
 
-                for fi in svd::field::expand(f, de) {
+                for (i, fi) in svd::field::expand(f, de).enumerate() {
                     let sub_offset = fi.bit_offset() as u64;
                     let name_snake_case_n = field_accessor(&fi.name, config, span);
                     let doc = description_with_bits(
@@ -1328,12 +1374,18 @@ pub fn fields(
                         width,
                     );
                     let sub_offset = unsuffixed(sub_offset);
+                    let ident = format_ident!(
+                        "{}_W",
+                        inflections::case::to_constant_case(
+                            field_accessor(&fi.name, config, span).to_string().as_str(),
+                        )
+                    );
 
                     w_impl_items.extend(quote! {
                         #[doc = #doc]
                         #inline
-                        pub fn #name_snake_case_n(&mut self) -> #writer_ty<#regspec_ty> {
-                            #writer_ty::new(self)
+                        pub fn #name_snake_case_n(&mut self) -> #ident<#regspec_ty> {
+                            #ident::new(self)
                         }
                     });
                 }
@@ -1593,8 +1645,8 @@ fn add_from_variants<'a>(
     }
 }
 
-fn calculate_offset(increment: u32, offset: u64, with_parentheses: bool) -> TokenStream {
-    let mut res = quote! { n };
+fn calculate_offset(index: u8, increment: u32, offset: u64) -> TokenStream {
+    let mut res = unsuffixed(index).to_token_stream();
     if increment != 1 {
         let increment = unsuffixed(increment);
         res = quote! { #res * #increment };
@@ -1603,11 +1655,11 @@ fn calculate_offset(increment: u32, offset: u64, with_parentheses: bool) -> Toke
         let offset = &unsuffixed(offset);
         res = quote! { #res + #offset };
     }
-    let single_ident = (increment == 1) && (offset == 0);
-    if with_parentheses && !single_ident {
-        quote! { (#res) }
-    } else {
+    let single_value = (increment == 1) && (offset == 0);
+    if single_value {
         res
+    } else {
+        quote! {{ #res }}
     }
 }
 
