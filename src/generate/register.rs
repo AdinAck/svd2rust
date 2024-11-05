@@ -742,6 +742,17 @@ pub fn fields(
             String::new()
         };
 
+        let offset_calc = match &f {
+            Field::Single(_) => {
+                let lit = unsuffixed(offset);
+                quote! { #lit }
+            }
+            Field::Array(_, de) => {
+                // calculate_offset(de.dim_increment, offset, false)
+                quote! { 0 }
+            }
+        };
+
         // If this field can be read, generate read proxy structure and value structure.
         if can_read {
             // collect information on items in enumeration to generate it later.
@@ -1006,11 +1017,9 @@ pub fn fields(
             };
 
             if let Field::Array(f, de) = &f {
-                let increment = de.dim_increment;
                 let doc = description.expand_dim(&brief_suffix);
                 let first_name = svd::array::names(f, de).next().unwrap();
                 let note = format!("<div class=\"warning\">`n` is number of field in register. `n == 0` corresponds to `{first_name}` field.</div>");
-                let offset_calc = calculate_offset(increment, offset, true);
                 let value = quote! { ((self.bits >> #offset_calc) & #hexmask) #cast };
                 let dim = unsuffixed(de.dim);
                 let name_snake_case_iter = Ident::new(&format!("{name_snake_case}_iter"), span);
@@ -1213,6 +1222,8 @@ pub fn fields(
             // name of write proxy type
             let writer_ty = ident(&name, config, "field_writer", span);
 
+            let doc = description_with_bits(description_raw, offset, width);
+
             // Generate writer structure by type alias to generic write proxy structure.
             match rwenum.write_enum() {
                 Some(EV::New(_)) | None => {
@@ -1231,20 +1242,20 @@ pub fn fields(
                             span,
                         );
                         if value_write_ty == "bool" {
-                            quote! { crate::#wproxy<'a, REG> }
+                            quote! { crate::#wproxy<'a, REG, #offset_calc> }
                         } else {
-                            quote! { crate::#wproxy<'a, REG, #value_write_ty> }
+                            quote! { crate::#wproxy<'a, REG, #offset_calc, #value_write_ty> }
                         }
                     } else {
                         let wproxy = Ident::new("FieldWriter", span);
                         let uwidth = &unsuffixed(width);
                         if value_write_ty == "u8" && safety != Safety::Safe {
-                            quote! { crate::#wproxy<'a, REG, #uwidth> }
+                            quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc> }
                         } else if safety != Safety::Safe {
-                            quote! { crate::#wproxy<'a, REG, #uwidth, #value_write_ty> }
+                            quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc, #value_write_ty> }
                         } else {
                             let safe_ty = safety.ident(width);
-                            quote! { crate::#wproxy<'a, REG, #uwidth, #value_write_ty, crate::#safe_ty> }
+                            quote! { crate::#wproxy<'a, REG, #uwidth, #offset_calc, #value_write_ty, crate::#safe_ty> }
                         }
                     };
                     mod_items.extend(quote! {
@@ -1293,9 +1304,6 @@ pub fn fields(
 
             // Generate field writer accessors
             if let Field::Array(f, de) = &f {
-                let increment = de.dim_increment;
-                let offset_calc = calculate_offset(increment, offset, false);
-                let doc = &description.expand_dim(&brief_suffix);
                 let first_name = svd::array::names(f, de).next().unwrap();
                 let note = format!("<div class=\"warning\">`n` is number of field in register. `n == 0` corresponds to `{first_name}` field.</div>");
                 let dim = unsuffixed(de.dim);
@@ -1307,7 +1315,7 @@ pub fn fields(
                     pub fn #name_snake_case(&mut self, n: u8) -> #writer_ty<#regspec_ty> {
                         #[allow(clippy::no_effect)]
                         [(); #dim][n as usize];
-                        #writer_ty::new(self, #offset_calc)
+                        #writer_ty::new(self)
                     }
                 });
 
@@ -1325,18 +1333,16 @@ pub fn fields(
                         #[doc = #doc]
                         #inline
                         pub fn #name_snake_case_n(&mut self) -> #writer_ty<#regspec_ty> {
-                            #writer_ty::new(self, #sub_offset)
+                            #writer_ty::new(self)
                         }
                     });
                 }
             } else {
-                let doc = description_with_bits(description_raw, offset, width);
-                let offset = unsuffixed(offset);
                 w_impl_items.extend(quote! {
                     #[doc = #doc]
                     #inline
                     pub fn #name_snake_case(&mut self) -> #writer_ty<#regspec_ty> {
-                        #writer_ty::new(self, #offset)
+                        #writer_ty::new(self)
                     }
                 });
             }
